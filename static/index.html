@@ -62,6 +62,7 @@
 <script>
     const canvas = document.getElementById('c');
     const host = window.location.host;
+    const origin = window.location.origin;
     const context = canvas.getContext("2d");
     const W = canvas.width = window.innerWidth - 6;
     const H = canvas.height = window.innerHeight - 50;
@@ -73,7 +74,7 @@
             currentColour = ev.target.getAttribute("value");
         })
     });
-    console.log("set element styles")
+    console.log("set element styles");
 
     async function _jsonFetch(url, method, data) {
         const options = {
@@ -95,7 +96,13 @@
         return await _jsonFetch(url, "GET");
     }
 
+
     world = {};
+    // load the world on page load
+    getJson(origin + "/world").then(resp => {
+        world = resp;
+        drawNext = true;
+    })
     localEntityQueue = {};
 
     //XXX: TODO Make this prettier!
@@ -168,7 +175,7 @@
     function addEntity(entity, data) {
         drawNext = true;
         world[entity] = data;
-        localEntityQueue[entity] = data;
+        socket.send(JSON.stringify({[entity]: data}));
     }
 
     function addEntityWithoutName(data) {
@@ -305,28 +312,22 @@
         drawFrame();
     }
 
-    async function syncLocalRemoteWorlds() {
-        // post all of our pending changes
-        Promise.all([...Object.keys(localEntityQueue)].map((k) => {
-            postJson(`/entity/${k}`, localEntityQueue[k]);
-            // clear the queue of outdated objects
-            delete localEntityQueue[k];
-            return respPromise;
-        }));
-
-        const beforeMerge = Object.keys(world).length;
-        // merge our local world (which may be ahead with our local changes) with the remote world
-        let remoteWorld = await getJson("/world");
-        world = {...remoteWorld, ...world};
-        const afterMerge = Object.keys(world).length;
-        if (beforeMerge < afterMerge) {drawNext = true;}
-    }
+    const url = "ws://" + host + "/subscribe";
+    socket = new WebSocket(url);
+    socket.onopen = () => console.log(`opened at ws to ${url}`);
+    socket.onerror = (err) => console.error(`socket error occurred: ${err}`)
+    socket.onmessage = (msg) => {
+        try {
+            console.log("RECV: ", msg.data);
+            const recv_data = JSON.parse(msg.data);
+            world = {...world, ...recv_data};
+        } catch (e) {
+            console.error("error occurred while processing message: ", e);
+        }
+    };
 
     // 60 FPS local experience
     setInterval(updateLocal, 1000 / 60);
-    // 24 FPS for updating remote objects (for performance reasons, and also it makes it look like film movie
-    setInterval(syncLocalRemoteWorlds, 1000 / 30);
-
 </script>
 </body>
 </html>

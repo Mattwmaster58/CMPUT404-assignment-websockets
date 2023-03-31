@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 import flask
-from flask import Flask, request
+from flask import Flask, request, redirect
 from flask_sockets import Sockets
 import gevent
 from gevent import queue
@@ -25,6 +25,20 @@ import os
 app = Flask(__name__)
 sockets = Sockets(app)
 app.debug = True
+
+clients = []
+
+
+# from: https://github.com/uofa-cmput404/cmput404-slides/tree/master/examples/WebSocketsExamples
+class Client:
+    def __init__(self):
+        self.queue = queue.Queue()
+
+    def put(self, v):
+        self.queue.put_nowait(v)
+
+    def get(self):
+        return self.queue.get()
 
 
 class World:
@@ -61,34 +75,63 @@ class World:
         return self.space
 
 
+def client_propagate(key, val):
+    for c in clients:
+        c.put(json.dumps({key: val}))
+
+
 myWorld = World()
+myWorld.add_set_listener(client_propagate)
 
 
 def set_listener(entity, data):
     ''' do something with the update ! '''
-
-
-myWorld.add_set_listener(set_listener)
+    for client in clients:
+        json_data = json.dumps({entity: data})
+        client.put(json_data)
 
 
 @app.route('/')
 def hello():
     '''Return something coherent here.. perhaps redirect to /static/index.html '''
-    return None
+    return redirect("/static/index.html", code=307)
 
 
-def read_ws(ws, client):
+def read_ws(ws):
     '''A greenlet function that reads from the websocket and updates the world'''
-    # XXX: TODO IMPLEMENT ME
-    return None
+    try:
+        while True:
+            msg = ws.receive()
+            if msg:
+                parsed = json.loads(msg)
+                print(f"received: {parsed}")
+                for k, v in parsed.items():
+                    myWorld.set(k, v)
+            else:
+                break
+    except Exception as e:
+        print(f"exception occurred while reading ws: {e}\n just trying not to crash at this point :\\")
 
 
 @sockets.route('/subscribe')
 def subscribe_socket(ws):
     '''Fufill the websocket URL of /subscribe, every update notify the
        websocket and read updates from the websocket '''
-    # XXX: TODO IMPLEMENT ME
-    return None
+    client = Client()
+    clients.append(client)
+
+    g = gevent.spawn(read_ws, ws)
+
+    ws.send(json.dumps(myWorld.world()))
+    try:
+        while True:
+            # client will wait for an item in the queue to send it
+            msg = client.get()
+            ws.send(msg)
+    except Exception as e:
+        print(f"Failed to subscribe{e}")
+    finally:
+        clients.remove(client)
 
 
 # I give this to you, this is how you get the raw body/data portion of a post in flask
@@ -96,9 +139,9 @@ def subscribe_socket(ws):
 def flask_post_json():
     '''Ah the joys of frameworks! They do so much work for you
        that they get in the way of sane operation!'''
-    if (request.json != None):
+    if request.json is not None:
         return request.json
-    elif (request.data != None and request.data.decode("utf8") != u''):
+    elif request.data is not None and request.data.decode("utf8") != u'':
         return json.loads(request.data.decode("utf8"))
     else:
         return json.loads(request.form.keys()[0])
@@ -107,25 +150,53 @@ def flask_post_json():
 @app.route("/entity/<entity>", methods=['POST', 'PUT'])
 def update(entity):
     '''update the entities via this interface'''
-    return None
+    data = flask_post_json()
+
+    """
+    I'm a little confused why this method allows both POST and PUT, the biggest difference I found between POST and PUT
+    is that PUT (should be) idempotent. But in the context of this route (where we have a specific entity ID), I don't 
+    see a way to not implement both of them as idempotent.
+    """
+    original_entity = myWorld.get(entity)
+    expected_keys = {"x", "y", "colour"}
+
+    if not all(map(lambda k: k in data.keys(), expected_keys)) and not original_entity:
+        return {"message": f"failed to update {entity}: "
+                           "there was no pre-existing entity of the world to update,"
+                           "and you did not provide all entity fields to create a new one"
+                }, 400
+
+    filtered_entity = {k:v for k,v in data.items() if k in expected_keys}
+    # ie, filtered_entity will overwrite keys that exist
+    replacement_val = {**original_entity, **filtered_entity}
+    myWorld.set(entity, replacement_val)
+
+    return replacement_val
 
 
 @app.route("/world", methods=['POST', 'GET'])
 def world():
     '''you should probably return the world here'''
-    return None
+    if request.method == 'GET':
+        return myWorld.world()
+    elif request.method == 'POST':
+        data = flask_post_json()
+        for entity in data.keys():
+            myWorld.set(entity, data[entity])
+        return {"message": "upload world from JSON keys"}
 
 
 @app.route("/entity/<entity>")
 def get_entity(entity):
     '''This is the GET version of the entity interface, return a representation of the entity'''
-    return None
+    return myWorld.get(entity) or {"message": f"no entity {entity} exists"}, 404
 
 
 @app.route("/clear", methods=['POST', 'GET'])
 def clear():
     '''Clear the world out!'''
-    return None
+    myWorld.clear()
+    return {"message": "cleared successfully"}
 
 
 if __name__ == "__main__":
@@ -134,4 +205,4 @@ if __name__ == "__main__":
         and run
         gunicorn -k flask_sockets.worker sockets:app
     '''
-    app.run()
+    app.run(port=5002)
